@@ -617,13 +617,31 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
 
 }  // namespace
 
+
+StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
+    const CompressParams& cparams, const Image3F& opsin,
+    const PassesEncoderState* JXL_RESTRICT state, ThreadPool* pool,
+    AuxOut* aux_out, bool is_xyb) {
+    std::vector<PatchInfo> info;
+    return info;
+  }
+
+
 Status FindBestPatchDictionary(const Image3F& opsin,
                                PassesEncoderState* JXL_RESTRICT state,
                                const JxlCmsInterface& cms, ThreadPool* pool,
                                AuxOut* aux_out, bool is_xyb) {
-  JXL_ASSIGN_OR_RETURN(
-      std::vector<PatchInfo> info,
+  std::vector<PatchInfo> info;
+  if (state->cparams.butteraugli_distance == 0) {
+    JXL_ASSIGN_OR_RETURN(
+      info,
+      FindTextLikePatchesLossless(state->cparams, opsin, state, pool, aux_out, is_xyb));
+  }
+  else{
+    JXL_ASSIGN_OR_RETURN(
+      info,
       FindTextLikePatches(state->cparams, opsin, state, pool, aux_out, is_xyb));
+  }
   JxlMemoryManager* memory_manager = opsin.memory_manager();
 
   // TODO(veluca): this doesn't work if both dots and patches are enabled.
