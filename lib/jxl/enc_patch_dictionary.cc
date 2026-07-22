@@ -232,14 +232,22 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
     const CompressParams& cparams, const Image3F& opsin,
     const PassesEncoderState* JXL_RESTRICT state, ThreadPool* pool,
     AuxOut* aux_out, bool is_xyb) {
+  
+  //future final result
   std::vector<PatchInfo> info;
-  if (state->cparams.patches == Override::kOff) return info;
-  const auto& frame_dim = state->shared.frame_dim;
-  JxlMemoryManager* memory_manager = opsin.memory_manager();
 
+  //if patches is off, return empty
+  if (state->cparams.patches == Override::kOff) return info;
+
+  //many frame dimension information
+  const auto& frame_dim = state->shared.frame_dim;
+
+  //?
+  JxlMemoryManager* memory_manager = opsin.memory_manager();
   PatchColorspaceInfo pci(is_xyb);
   float kSimilarThreshold = 0.8f;
 
+  //return true if 2 pixels are similar by color (in a specefic patch)
   auto is_similar_impl = [&pci](const XY& p1, const XY& p2,
                                 const float* JXL_RESTRICT rows[3],
                                 size_t stride, float threshold) {
@@ -251,15 +259,23 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
   };
 
   std::atomic<uint32_t> screenshot_area_seeds{0};
+
+  //pixels x row
   const size_t opsin_stride = opsin.PixelsPerRow();
+
+  //all pixels in one single list, 3 values per pixel (rgb?)
   const float* JXL_RESTRICT opsin_rows[3] = {opsin.ConstPlaneRow(0, 0),
                                              opsin.ConstPlaneRow(1, 0),
                                              opsin.ConstPlaneRow(2, 0)};
+
+  //return the color of one pixel
   const auto pick = [&opsin_rows, opsin_stride](const XY& p) -> Color {
     size_t offset = p.second * opsin_stride + p.first;
     return {opsin_rows[0][offset], opsin_rows[1][offset],
             opsin_rows[2][offset]};
   };
+
+  // return 1 if one pixel = a specific color
   const auto is_same_color = [&opsin_rows, opsin_stride](
                                  const XY& p, const Color& c) -> size_t {
     const size_t offset = p.second * opsin_stride + p.first;
@@ -271,20 +287,28 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
     return 1;
   };
 
+  //return true if 2 pixels are similar by color (in all image)
   auto is_similar = [&](const XY& p1, const XY& p2) {
     return is_similar_impl(p1, p2, opsin_rows, opsin_stride, kSimilarThreshold);
   };
 
   // Look for kPatchSide size squares, naturally aligned, that all have the same
   // pixel values.
+
+  //create the image is_screenshot_like with dimensions pw and ph (see later)
   JXL_ASSIGN_OR_RETURN(
       ImageB is_screenshot_like,
       ImageB::Create(memory_manager, DivCeil(frame_dim.xsize, kPatchSide),
                      DivCeil(frame_dim.ysize, kPatchSide)));
+
+  //initialize is_screenshot_like with zeros
   ZeroFillImage(&is_screenshot_like);
+
+  //numbers of patch that fit in the image (x and y)
   const size_t pw = frame_dim.xsize / kPatchSide;
   const size_t ph = frame_dim.ysize / kPatchSide;
 
+  //return true if pixels in a patch is all the same color
   const auto flat_patch = [&](const XY& o, const Color& base) -> bool {
     for (size_t iy = 0; iy < kPatchSide; iy++) {
       for (size_t ix = 0; ix < kPatchSide; ix++) {
@@ -302,6 +326,8 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
   //   1) if patches are not enabled do sampling run for has_screenshot_areas
   //   2) if patches forced or not disables + has_screenshot_areas do
   //      SIMDified full scan for is_screenshot_like
+
+  //check the patch with flat_patch in a single row (in a strange way)
   const auto process_row = [&](const uint32_t py,
                                size_t /* thread */) -> Status {
     uint32_t found = 0;
@@ -327,13 +353,18 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
     screenshot_area_seeds.fetch_add(found);
     return true;
   };
+
   bool can_have_seeds = ((pw >= 3) && (ph >= 3));
+
+  //function to multi trheat (?)
   if (can_have_seeds) {
     JXL_RETURN_IF_ERROR(RunOnPool(pool, 1, ph - 2, ThreadPool::NoInit,
                                   process_row, "IsScreenshotLike"));
   }
 
   // TODO(veluca): also parallelize the rest of this function.
+
+  //for debugging (?)
   if (WantDebugOutput(cparams)) {
     JXL_RETURN_IF_ERROR(
         DumpPlaneNormalized(cparams, "screenshot_like", is_screenshot_like));
@@ -341,36 +372,60 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
 
   constexpr int kSearchRadius = 1;
 
+  //number of patch previously found
   size_t num_seeds = screenshot_area_seeds.load();
+
+  //if num_seeds = 0, return empty
   if (!ApplyOverride(state->cparams.patches, (num_seeds > 0))) {
     return info;
   }
 
   // Search for "similar enough" pixels near the screenshot-like areas.
+
+  //create is_backround
   JXL_ASSIGN_OR_RETURN(
       ImageB is_background,
       ImageB::Create(memory_manager, frame_dim.xsize, frame_dim.ysize));
+
+  //initialize is_backround with zeros
   ZeroFillImage(&is_background);
+
+  //create backround
   JXL_ASSIGN_OR_RETURN(
       Image3F background,
       Image3F::Create(memory_manager, frame_dim.xsize, frame_dim.ysize));
+
+  //initialize backround with zeros
   ZeroFillImage(&background);
+
   constexpr size_t kDistanceLimit = 50;
+
+  //all pixels of background on a single row (rgb?)
   float* JXL_RESTRICT background_rows[3] = {
       background.PlaneRow(0, 0),
       background.PlaneRow(1, 0),
       background.PlaneRow(2, 0),
   };
+
+  //pixel x row
   const size_t background_stride = background.PixelsPerRow();
+
+
   uint8_t* JXL_RESTRICT is_background_row = is_background.Row(0);
   const size_t is_background_stride = is_background.PixelsPerRow();
+
+  //return is_backround in a specific position
   const auto is_bg = [&](const XY& p) -> uint8_t& {
     return is_background_row[p.second * is_background_stride + p.first];
   };
+
+  //queue for bfs
   std::vector<std::pair<XY, XY>> queue;
   queue.reserve(2 * num_seeds * kPatchSide * kPatchSide);
   size_t queue_front = 0;
   // TODO(eustas): coalesce neighbours, leave only border.
+
+  //push in queue all top-left pixels of flat-colored patch
   if (can_have_seeds) {
     for (size_t py = 1; py < ph - 1; py++) {
       uint8_t* JXL_RESTRICT screenshot_row = is_screenshot_like.Row(py);
@@ -386,6 +441,8 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
       }
     }
   }
+
+  //bfs for checking what is backround
   while (queue_front < queue.size()) {
     XY cur = queue[queue_front].first;
     XY src = queue[queue_front].second;
@@ -424,6 +481,8 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
   ImageF ccs;
   Rng rng(0);
   bool paint_ccs = false;
+
+  //for debug
   if (WantDebugOutput(cparams)) {
     JXL_RETURN_IF_ERROR(
         DumpPlaneNormalized(cparams, "is_background", is_background));
@@ -441,8 +500,11 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
   constexpr float kVerySimilarThreshold = 0.03f;
   constexpr float kHasSimilarThreshold = 0.03f;
 
+  //constant copy
   const float* JXL_RESTRICT const_background_rows[3] = {
       background_rows[0], background_rows[1], background_rows[2]};
+
+  //is_similar but with better threshold
   auto is_similar_b = [&](std::pair<int, int> p1, std::pair<int, int> p2) {
     return is_similar_impl(p1, p2, const_background_rows, background_stride,
                            kVerySimilarThreshold);
@@ -453,16 +515,24 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
 
   // Find small CC outside the "similar enough" areas, compute bounding boxes,
   // and run heuristics to exclude some patches.
+
+  //create visited
   JXL_ASSIGN_OR_RETURN(
       ImageB visited,
       ImageB::Create(memory_manager, frame_dim.xsize, frame_dim.ysize));
+
+  //initialize visited with zeros
   ZeroFillImage(&visited);
+
+
   uint8_t* JXL_RESTRICT visited_row = visited.Row(0);
   const size_t visited_stride = visited.PixelsPerRow();
   std::vector<std::pair<uint32_t, uint32_t>> cc;
   std::vector<std::pair<uint32_t, uint32_t>> stack;
+
   for (size_t y = 0; y < frame_dim.ysize; y++) {
     for (size_t x = 0; x < frame_dim.xsize; x++) {
+
       if (is_background_row[y * is_background_stride + x]) continue;
       cc.clear();
       stack.clear();
@@ -611,6 +681,40 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
   if (max_patch_size < kMinMaxPatchSize) {
     info.clear();
   }
+
+  return info;
+}
+
+StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
+  const CompressParams& cparams, const Image3F& opsin,
+  const PassesEncoderState* JXL_RESTRICT state, ThreadPool* pool,
+  AuxOut* aux_out, bool is_xyb) {
+
+  std::vector<PatchInfo> info;
+  if (state->cparams.patches == Override::kOff) return info;
+
+  //...
+
+  float kEpsilon = 1e-4;
+
+  auto IntCast = [](float value, float epsilon) -> uint16_t {
+    return static_cast<uint16_t>(value/epsilon);
+  };
+
+  auto HashSmallGrid = [&](std::array<std::array<Color,3>,3> sg, float epsilon) -> size_t {
+    size_t seed = 0;
+    std::hash<uint16_t> hasher;
+    for (size_t y=0; y<sg.size(); ++y) {
+      for (size_t x=0; x<sg[y].size(); ++x) {
+        for(size_t& c : {0,1,2}) {
+          seed ^= hasher(IntCast(sg[y][x][c],epsilon)) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        }
+      }
+    }
+    return seed;
+  };
+
+  //...
 
   return info;
 }
