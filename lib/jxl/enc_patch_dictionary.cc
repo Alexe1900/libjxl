@@ -227,7 +227,6 @@ struct PatchColorspaceInfo {
 
 using XY = std::pair<int32_t, int32_t>;
 constexpr const size_t kPatchSide = 4;
-constexpr const float kEpsilon = 1e-4;
 
 StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
     const CompressParams& cparams, const Image3F& opsin,
@@ -265,7 +264,7 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
                                  const XY& p, const Color& c) -> size_t {
     const size_t offset = p.second * opsin_stride + p.first;
     for (size_t i = 0; i < c.size(); ++i) {
-      if (std::fabs(c[i] - opsin_rows[i][offset]) > kEpsilon) {
+      if (std::fabs(c[i] - opsin_rows[i][offset]) > 1e-4) {
         return 0;
       }
     }
@@ -620,114 +619,46 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
 
 
 StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
-  const CompressParams& cparams, const Image3F& opsin,
-  const PassesEncoderState* JXL_RESTRICT state, ThreadPool* pool,
-  AuxOut* aux_out, bool is_xyb) {
-  std::vector<PatchInfo> info;
-  if (state->cparams.patches == Override::kOff) return info;
-  const auto& frame_dim = state->shared.frame_dim;
-  JxlMemoryManager* memory_manager = opsin.memory_manager();
-  const size_t opsin_stride = opsin.PixelsPerRow();
-  const float* JXL_RESTRICT opsin_rows[3] = {opsin.ConstPlaneRow(0, 0),
-                                            opsin.ConstPlaneRow(1, 0),
-                                            opsin.ConstPlaneRow(2, 0)};
-  
-  const auto pick = [&opsin_rows, opsin_stride](const XY& p) -> Color {
-    int offset = p.second * opsin_stride + p.first;
+    const CompressParams& cparams, const Image3F& opsin,
+    const PassesEncoderState* JXL_RESTRICT state, ThreadPool* pool,
+    AuxOut* aux_out, bool is_xyb) {
+    std::vector<PatchInfo> info;
+    if (state->cparams.patches == Override::kOff) return info;
+    const auto& frame_dim = state->shared.frame_dim;
+    JxlMemoryManager* memory_manager = opsin.memory_manager();
+
+    const size_t opsin_stride = opsin.PixelsPerRow();
+    const float* JXL_RESTRICT opsin_rows[3] = {opsin.ConstPlaneRow(0, 0),
+                                             opsin.ConstPlaneRow(1, 0),
+                                             opsin.ConstPlaneRow(2, 0)};
+
+    const auto pick = [&opsin_rows, opsin_stride](const XY& p) -> Color {
+    size_t offset = p.second * opsin_stride + p.first;
     return {opsin_rows[0][offset], opsin_rows[1][offset],
             opsin_rows[2][offset]};
-  };
+    };
+    
+    constexpr const size_t kSmallGridSide = 3;
+    constexpr const size_t kSmallGridArea = kSmallGridSide*kSmallGridSide;    
 
-  auto are_colors_same = [](const Color c1, const Color c2) -> bool {
-    for (int i = 0; i < c1.size(); ++i) {
-      if (std::fabs(c1[i] - c2[i]) > kEpsilon) {
-        return 0;
-      }
-    }
-    return 1;
-  };
+    //TODO: change this ugly thing with hashing
+    std::vector<std::array<Color, kSmallGridArea>> smallGrids;
 
-  constexpr const size_t kSmallGridSide = 3;
-
-  auto are_small_grids_same = [&are_colors_same, &pick](const XY& g1, const XY& g2) -> bool {
-    for(int dy=0; dy<kSmallGridSide; dy++) {
-      for(int dx=0; dx<kSmallGridSide; dx++) {
-        if(!are_colors_same(pick({g1.first+dx, g1.second+dy}),
-                            pick({g2.first+dx, g2.second+dy}))) {
-          return 0;
+    for(size_t y=0; y<=frame_dim.ysize-kSmallGridSide; y++){
+      for(size_t x=0; x<=frame_dim.xsize-kSmallGridSide; x++){
+        std::array<Color, kSmallGridArea> arr;
+        for(size_t dy=0; dy<3; dy++){
+          for(size_t dx=0; dx<3; dx++){
+            arr[dy*kSmallGridSide+dx] = pick({x+dx, y+dy});
+          }
         }
+        smallGrids.push_back(arr);
       }
     }
-    return 1;
-  };
 
-  constexpr const size_t kNumberOfBuckets = 1<<20;
-  constexpr const size_t kHashingBase = 10007;
-  constexpr const size_t kHashingModulo = 1048573;
+    sort(smallGrids.begin(), smallGrids.end());
 
-  // Calculating the powers of the hashing base that will be needed later
-  constexpr auto kPowersOfHashingBase = [](){
-    const int number_of_needed_powers = kSmallGridSide*(kSmallGridSide-1)*3+1;
-    std::array<size_t, number_of_needed_powers> ret{};
-    ret[0]=1;
-    for(int i=0; i<number_of_needed_powers-1; i++){
-      ret[i+1]=(ret[i]*kHashingBase)%kHashingModulo;
-    }
-    return ret;
-  }();
-
-  auto float_to_int_for_hashing = [](const float& f) -> int {
-    return (int)(f/kEpsilon);
-  };
-
-  std::vector<std::vector<int64_t>> rolling_hash_table(frame_dim.ysize,
-                                                        std::vector<int64_t>
-                                                        (frame_dim.xsize, 0));
-
-  std::vector<std::vector<std::vector<XY>>> hm(kNumberOfBuckets);
-
-  for(int y=0; y<frame_dim.ysize; y++){
-    for(int x=0; x<frame_dim.xsize; x++){
-      Color curr_pixel_color = pick({x, y});
-      int curr_pixel_hash = 0;
-      for(auto c : curr_pixel_color){
-        curr_pixel_hash=(curr_pixel_hash*kHashingBase)%kHashingModulo;
-        curr_pixel_hash+=float_to_int_for_hashing(c);
-      }
-      curr_pixel_hash%=kHashingModulo;
-      
-      rolling_hash_table[y][x]+=curr_pixel_hash;
-      if(x>0) {
-        rolling_hash_table[y][x] += rolling_hash_table[y][x-1]*
-                                    kPowersOfHashingBase[3];
-        rolling_hash_table[y][x] %= kHashingModulo;
-      }
-      if(x>2) {
-        rolling_hash_table[y][x] -= (rolling_hash_table[y][x-3]*
-                                    kPowersOfHashingBase[9])%kHashingModulo;
-        if(rolling_hash_table[y][x]<0) rolling_hash_table[y][x]+=kHashingModulo;
-      }
-
-      if(x>1 && y>1) {
-        int curr_small_grid_hash = rolling_hash_table[y][x]+
-                                  (rolling_hash_table[y-1][x]*kPowersOfHashingBase[9])+
-                                  (rolling_hash_table[y-2][x]*kPowersOfHashingBase[18]);
-        curr_small_grid_hash%=kHashingModulo;
-        int bucket_index = curr_small_grid_hash;
-        int vi = 0;
-        while(vi<hm[bucket_index].size() &&
-              !are_small_grids_same(hm[bucket_index][vi][0], {x-2, y-2})) {
-          vi++;
-        }
-        if(vi==hm[bucket_index].size()) {
-          hm[bucket_index].push_back(std::vector<XY>());
-        }
-        hm[bucket_index][vi].push_back({x-2, y-2});
-      }
-    }
   }
-  return info;
-}
   
 
 
