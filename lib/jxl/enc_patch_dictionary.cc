@@ -623,43 +623,8 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
     const PassesEncoderState* JXL_RESTRICT state, ThreadPool* pool,
     AuxOut* aux_out, bool is_xyb) {
     std::vector<PatchInfo> info;
-    if (state->cparams.patches == Override::kOff) return info;
-    const auto& frame_dim = state->shared.frame_dim;
-    JxlMemoryManager* memory_manager = opsin.memory_manager();
-
-    const size_t opsin_stride = opsin.PixelsPerRow();
-    const float* JXL_RESTRICT opsin_rows[3] = {opsin.ConstPlaneRow(0, 0),
-                                             opsin.ConstPlaneRow(1, 0),
-                                             opsin.ConstPlaneRow(2, 0)};
-
-    const auto pick = [&opsin_rows, opsin_stride](const XY& p) -> Color {
-    size_t offset = p.second * opsin_stride + p.first;
-    return {opsin_rows[0][offset], opsin_rows[1][offset],
-            opsin_rows[2][offset]};
-    };
-    
-    constexpr const size_t kSmallGridSide = 3;
-    constexpr const size_t kSmallGridArea = kSmallGridSide*kSmallGridSide;    
-
-    //TODO: change this ugly thing with hashing
-    std::vector<std::array<Color, kSmallGridArea>> smallGrids;
-
-    for(size_t y=0; y<=frame_dim.ysize-kSmallGridSide; y++){
-      for(size_t x=0; x<=frame_dim.xsize-kSmallGridSide; x++){
-        std::array<Color, kSmallGridArea> arr;
-        for(size_t dy=0; dy<3; dy++){
-          for(size_t dx=0; dx<3; dx++){
-            arr[dy*kSmallGridSide+dx] = pick({x+dx, y+dy});
-          }
-        }
-        smallGrids.push_back(arr);
-      }
-    }
-
-    sort(smallGrids.begin(), smallGrids.end());
-
+    return info;
   }
-  
 
 
 Status FindBestPatchDictionary(const Image3F& opsin,
