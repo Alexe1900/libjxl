@@ -14,6 +14,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <queue>
+#include <stack>
 #include <utility>
 #include <vector>
 
@@ -627,6 +629,7 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
   if (state->cparams.patches == Override::kOff) return info;
   const auto& frame_dim = state->shared.frame_dim;
   JxlMemoryManager* memory_manager = opsin.memory_manager();
+  PatchColorspaceInfo pci(is_xyb);
   const size_t opsin_stride = opsin.PixelsPerRow();
   const float* JXL_RESTRICT opsin_rows[3] = {opsin.ConstPlaneRow(0, 0),
                                             opsin.ConstPlaneRow(1, 0),
@@ -649,11 +652,11 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
 
   constexpr const size_t kSmallGridSide = 3;
 
-  auto are_small_grids_same = [&are_colors_same, &pick](const XY& g1, const XY& g2) -> bool {
-    for(int dy=0; dy<kSmallGridSide; dy++) {
-      for(int dx=0; dx<kSmallGridSide; dx++) {
-        if(!are_colors_same(pick({g1.first+dx, g1.second+dy}),
-                            pick({g2.first+dx, g2.second+dy}))) {
+  auto are_patches_same = [&are_colors_same, &pick](XY p1, XY p2, XY dim) -> bool{
+    for(size_t dy=0; dy<dim.second; dy++) {
+      for(size_t dx=0; dx<dim.first; dx++) {
+        if(!are_colors_same(pick({p1.first+dx, p1.second+dy}),
+                            pick({p2.first+dx, p2.second+dy}))) {
           return 0;
         }
       }
@@ -661,7 +664,11 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
     return 1;
   };
 
-  constexpr const size_t kNumberOfBuckets = 1<<20;
+  auto are_small_grids_same = [&are_patches_same, &kSmallGridSide](const XY& g1, const XY& g2) -> bool {
+    return are_patches_same(g1, g2, {kSmallGridSide, kSmallGridSide});
+  };
+
+  constexpr const size_t kNumberOfBuckets = 1<<17;
   constexpr const size_t kHashingBase = 10007;
   constexpr const size_t kHashingModulo = 1048573;
 
@@ -684,17 +691,19 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
                                                         std::vector<int64_t>
                                                         (frame_dim.xsize, 0));
 
-  std::vector<std::vector<std::vector<XY>>> hm(kNumberOfBuckets);
+  std::vector<std::vector<std::vector<XY>>> small_grid_hm(kNumberOfBuckets);
 
-  for(int y=0; y<frame_dim.ysize; y++){
-    for(int x=0; x<frame_dim.xsize; x++){
+  for(int y=0; y<frame_dim.ysize; y++) {
+    std::queue<int64_t> latest_pixel_hashes;
+    for(int x=0; x<frame_dim.xsize; x++) {
       Color curr_pixel_color = pick({x, y});
-      int curr_pixel_hash = 0;
-      for(auto c : curr_pixel_color){
+      int64_t curr_pixel_hash = 0;
+      for(auto c : curr_pixel_color) {
         curr_pixel_hash=(curr_pixel_hash*kHashingBase)%kHashingModulo;
         curr_pixel_hash+=float_to_int_for_hashing(c);
       }
       curr_pixel_hash%=kHashingModulo;
+      latest_pixel_hashes.push(curr_pixel_hash);
       
       rolling_hash_table[y][x]+=curr_pixel_hash;
       if(x>0) {
@@ -703,9 +712,10 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
         rolling_hash_table[y][x] %= kHashingModulo;
       }
       if(x>2) {
-        rolling_hash_table[y][x] -= (rolling_hash_table[y][x-3]*
+        rolling_hash_table[y][x] -= (latest_pixel_hashes.front()*
                                     kPowersOfHashingBase[9])%kHashingModulo;
         if(rolling_hash_table[y][x]<0) rolling_hash_table[y][x]+=kHashingModulo;
+        latest_pixel_hashes.pop();
       }
 
       if(x>1 && y>1) {
@@ -715,17 +725,350 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
         curr_small_grid_hash%=kHashingModulo;
         int bucket_index = curr_small_grid_hash;
         int vi = 0;
-        while(vi<hm[bucket_index].size() &&
-              !are_small_grids_same(hm[bucket_index][vi][0], {x-2, y-2})) {
+        while(vi<small_grid_hm[bucket_index].size() &&
+              !are_small_grids_same(small_grid_hm[bucket_index][vi][0], {x-2, y-2})) {
           vi++;
         }
-        if(vi==hm[bucket_index].size()) {
-          hm[bucket_index].push_back(std::vector<XY>());
+        if(vi==small_grid_hm[bucket_index].size()) {
+          small_grid_hm[bucket_index].push_back(std::vector<XY>());
         }
-        hm[bucket_index][vi].push_back({x-2, y-2});
+        small_grid_hm[bucket_index][vi].push_back({x-2, y-2});
       }
     }
   }
+
+  JXL_ASSIGN_OR_RETURN(
+      ImageB is_part_of_patch,
+      ImageB::Create(memory_manager, frame_dim.xsize, frame_dim.ysize));
+  ZeroFillImage(&is_part_of_patch);
+  uint8_t* JXL_RESTRICT is_part_of_patch_row = is_part_of_patch.Row(0);
+  const size_t is_part_of_patch_stride = is_part_of_patch.PixelsPerRow();
+
+  auto has_no_patch_parts = [&is_part_of_patch, is_part_of_patch_row,
+                            is_part_of_patch_stride] (const XY& coord,
+                            const size_t& width, const size_t& height) ->bool {
+    for(int dy=0; dy<height; dy++) {
+      for(int dx=0; dx<width; dx++) {
+        size_t offset = (coord.second+dy)*is_part_of_patch_stride + coord.first+dx;
+        if(is_part_of_patch_row[offset]) return 0;
+      } 
+    }
+    return 1;
+  };
+
+  auto set_as_patch = [is_part_of_patch_row,
+                      is_part_of_patch_stride] (const XY& coord,
+                      const size_t& width, const size_t& height, bool is_patch) {
+    for(int dy=0; dy<height; dy++) {
+      for(int dx=0; dx<width; dx++) {
+        size_t offset = (coord.second+dy)*is_part_of_patch_stride + coord.first+dx;
+        is_part_of_patch_row[offset]=is_patch;
+      } 
+    }
+  };
+
+  auto hash_line = [&pick, &float_to_int_for_hashing, &kPowersOfHashingBase](const XY& start, const XY& end) {
+    XY delta;
+    size_t number_of_pixels;
+    if(start.first==end.first) delta={0, 1}, number_of_pixels=end.second-start.second;
+    else delta={1, 0}, number_of_pixels=end.first-start.first;
+    XY curr=start;
+    int64_t hash=0;
+    for(int i=0; i<number_of_pixels; i++){
+      Color curr_pixel_color = pick({curr.first, curr.second});
+      int64_t curr_pixel_hash = 0;
+      for(auto c : curr_pixel_color) {
+        curr_pixel_hash=(curr_pixel_hash*kHashingBase)%kHashingModulo;
+        curr_pixel_hash+=float_to_int_for_hashing(c);
+      }
+      hash*=kPowersOfHashingBase[3];
+      hash+=curr_pixel_hash;
+      hash%=kHashingModulo;
+      curr.first+=delta.first;
+      curr.second+=delta.second;
+    }
+    return hash;
+  };
+
+  auto confirm_patch = [&info, &opsin_rows, &pci, opsin_stride](std::vector<XY> coords, XY dimensions){
+    constexpr int kMinPeak = 2;
+    info.emplace_back();
+    for(XY c : coords) {
+      info.back().second.emplace_back(static_cast<uint32_t>(c.first),
+                                    static_cast<uint32_t>(c.second));
+    }
+    QuantizedPatch& patch = info.back().first;
+    patch.xsize = dimensions.first;
+    patch.ysize = dimensions.second;
+    bool too_big = false;
+    bool too_small = true;
+    for (size_t c : {1, 0, 2}) {
+      for (size_t iy = coords[0].second; iy < coords[0].second+dimensions.second; iy++) {
+        for (size_t ix = coords[0].first; ix < coords[0].first+dimensions.first; ix++) {
+          size_t offset = (iy - coords[0].second) * patch.xsize + ix - coords[0].first;
+          float fval = opsin_rows[c][iy * opsin_stride + ix];
+          patch.fpixels[c][offset] = fval;
+          int val = pci.Quantize(patch.fpixels[c][offset], c);
+          int8_t qval = static_cast<int8_t>(val);
+          patch.pixels[c][offset] = qval;
+          too_big |= (val != static_cast<int>(qval));
+          too_small &= (val < kMinPeak) && (val > -kMinPeak);
+        }
+      }
+    }
+    if (too_small || too_big) {
+      info.pop_back();
+    }
+  };
+
+  constexpr const size_t kMinPatchArea = 15;
+  constexpr const size_t kSmallNumberOfBuckets = 1<<7;
+  constexpr const size_t kMinPatchOccurences=2;
+
+  // Iterating over each bucket
+  for(auto bucket : small_grid_hm) {
+    // Iterating over each array of unique 3x3 grids
+    for(auto v : bucket) {
+      std::stack<std::pair<XY, std::vector<XY>>> identicalPatches;
+      std::vector<XY> starting_patches;
+
+      // Finding the grids which don't overlap and aren't covered by other patches
+      for(auto sg : v) {
+        if(has_no_patch_parts(sg, kSmallGridSide, kSmallGridSide)) {
+          set_as_patch(sg, kSmallGridSide, kSmallGridSide, 1);
+          starting_patches.push_back(sg);
+        }
+      }
+      // If there are not enough valid 3x3 grids identical to this one, ignore this one
+      if(starting_patches.empty()) continue;
+      if(starting_patches.size()<kMinPatchOccurences) {
+        set_as_patch(starting_patches[0], kSmallGridSide, kSmallGridSide, 0);
+        continue;
+      }
+      identicalPatches.push({{kSmallGridSide, kSmallGridSide}, starting_patches});
+
+      while(!identicalPatches.empty()) {
+        size_t curr_width=identicalPatches.top().first.first,
+        curr_height=identicalPatches.top().first.second;
+        size_t area_after_expansion;
+        std::vector<XY> coordinates=identicalPatches.top().second;
+        identicalPatches.pop();
+        
+        std::vector<std::vector<std::vector<std::pair<XY, size_t>>>> line_hm(kSmallNumberOfBuckets);
+        std::pair<size_t, size_t> best_expansion_ind;
+        std::vector<std::pair<XY, size_t>> best_expansion;
+        size_t curr_total_number_of_pixels=curr_height*curr_width*identicalPatches.size();
+        size_t best_total_number_of_pixels=0;
+
+        // L -> left; R -> right; U -> upwards; D -> downwards; x -> no expansion found
+        char type_of_best_expansion='X';
+
+        // Trying to expand to the left
+        if(curr_width<kMaxPatchSize){
+          area_after_expansion = (curr_width+1)*curr_height;
+          for(size_t index=0; index<coordinates.size(); index++){
+            XY p=coordinates[index];
+            if(p.first<=0) continue; // Can't expand to the left
+            if(has_no_patch_parts({p.first-1, p.second}, 1, curr_height)) {
+
+              // If the line that should be added as part of the expansion is valid,
+              // put it in a hash map to find the expansion which maximizes the
+              // number of pixels in a patch
+              int bucket_index=hash_line({p.first-1, p.second},
+                                        {p.first-1, p.second+curr_height-1})%kSmallNumberOfBuckets;
+              int vi = 0;
+              while(vi<line_hm[bucket_index].size() &&
+                    !are_patches_same({p.first-1, p.second},
+                    line_hm[bucket_index][vi][0].first, {1, curr_height})) {
+                vi++;
+              }
+              if(vi==line_hm[bucket_index].size()) {
+                line_hm[bucket_index].push_back(std::vector<std::pair<XY, size_t>>());
+              }
+              line_hm[bucket_index][vi].push_back({{p.first-1, p.second}, index});
+              if(line_hm[bucket_index][vi].size()*area_after_expansion
+                >best_total_number_of_pixels &&
+                line_hm[bucket_index][vi].size()>kMinPatchOccurences) {
+                // Updating the variables which store which expansion is best
+                best_total_number_of_pixels=line_hm[bucket_index][vi].size()*
+                area_after_expansion;
+                type_of_best_expansion='L';
+                best_expansion_ind={bucket_index, vi};
+              }
+            }
+          }
+
+          // Save the best expansion and then clear the hash map
+          if(type_of_best_expansion=='L')
+            best_expansion=line_hm[best_expansion_ind.first][best_expansion_ind.second];
+          for(auto b : line_hm) b.clear();
+        }
+        
+        // Trying to expand to the right
+        if(curr_width<kMaxPatchSize){
+          area_after_expansion = (curr_width+1)*curr_height;
+          for(size_t index=0; index<coordinates.size(); index++){
+            XY p=coordinates[index];
+            if(p.first>=frame_dim.xsize-curr_width) continue; // Can't expand to the right
+            if(has_no_patch_parts({p.first+curr_width, p.second}, 1, curr_height)) {
+              int bucket_index=hash_line({p.first+curr_width, p.second},
+                              {p.first+curr_width, p.second+curr_height-1})%kSmallNumberOfBuckets;
+              int vi = 0;
+              while(vi<line_hm[bucket_index].size() &&
+                    !are_patches_same({p.first+curr_width, p.second},
+                    line_hm[bucket_index][vi][0].first, {1, curr_height})) {
+                vi++;
+              }
+              if(vi==line_hm[bucket_index].size()) {
+                line_hm[bucket_index].push_back(std::vector<std::pair<XY, size_t>>());
+              }
+              line_hm[bucket_index][vi].push_back({{p.first, p.second}, index});
+              if(line_hm[bucket_index][vi].size()*area_after_expansion
+                >best_total_number_of_pixels &&
+                line_hm[bucket_index][vi].size()>kMinPatchOccurences) {
+                // Updating the variables which store which expansion is best
+                best_total_number_of_pixels=line_hm[bucket_index][vi].size()*
+                area_after_expansion;
+                type_of_best_expansion='R';
+                best_expansion_ind={bucket_index, vi};
+              }
+            }
+          }
+
+          // Save the best expansion and then clear the hash map
+          if(type_of_best_expansion=='R')
+            best_expansion=line_hm[best_expansion_ind.first][best_expansion_ind.second];
+          for(auto b : line_hm) b.clear();
+        }
+
+        // Trying to expand upwards
+        if(curr_height<kMaxPatchSize){
+          area_after_expansion = curr_width*(curr_height+1);
+          for(size_t index=0; index<coordinates.size(); index++){
+            XY p=coordinates[index];
+            if(p.second<=0) continue; // Can't expand upwards
+            if(has_no_patch_parts({p.first, p.second-1}, curr_width, 1)) {
+              int bucket_index=hash_line({p.first, p.second-1},
+                                        {p.first+curr_width-1, p.second-1})%kSmallNumberOfBuckets;
+              int vi = 0;
+              while(vi<line_hm[bucket_index].size() &&
+                    !are_patches_same({p.first, p.second-1},
+                    line_hm[bucket_index][vi][0].first, {curr_width, 1})) {
+                vi++;
+              }
+              if(vi==line_hm[bucket_index].size()) {
+                line_hm[bucket_index].push_back(std::vector<std::pair<XY, size_t>>());
+              }
+              line_hm[bucket_index][vi].push_back({{p.first, p.second-1}, index});
+              if(line_hm[bucket_index][vi].size()*area_after_expansion
+                >best_total_number_of_pixels &&
+                line_hm[bucket_index][vi].size()>kMinPatchOccurences) {
+                // Updating the variables which store which expansion is best
+                best_total_number_of_pixels=line_hm[bucket_index][vi].size()*
+                area_after_expansion;
+                type_of_best_expansion='U';
+                best_expansion_ind={bucket_index, vi};
+              }
+            }
+          }
+
+          // Save the best expansion and then clear the hash map
+          if(type_of_best_expansion=='U')
+            best_expansion=line_hm[best_expansion_ind.first][best_expansion_ind.second];
+          for(auto b : line_hm) b.clear();
+        }
+
+        // Try to expand downwards
+        if(curr_height<kMaxPatchSize){
+          area_after_expansion = curr_width*(curr_height+1);
+          for(size_t index=0; index<coordinates.size(); index++){
+            XY p=coordinates[index];
+            if(p.second>=frame_dim.ysize-curr_height) continue; // Can't expand downwards
+            if(has_no_patch_parts({p.first, p.second+curr_height}, curr_width, 1)) {
+              int bucket_index=hash_line({p.first, p.second+curr_height},
+                                {p.first+curr_width-1, p.second+curr_height})%kSmallNumberOfBuckets;
+              int vi = 0;
+              while(vi<line_hm[bucket_index].size() &&
+                    !are_patches_same({p.first, p.second+curr_height},
+                    line_hm[bucket_index][vi][0].first, {curr_width, 1})) {
+                vi++;
+              }
+              if(vi==line_hm[bucket_index].size()) {
+                line_hm[bucket_index].push_back(std::vector<std::pair<XY, size_t>>());
+              }
+              line_hm[bucket_index][vi].push_back({{p.first, p.second}, index});
+              if(line_hm[bucket_index][vi].size()*area_after_expansion
+                >best_total_number_of_pixels &&
+                line_hm[bucket_index][vi].size()>kMinPatchOccurences) {
+                // Updating the variables which store which expansion is best
+                best_total_number_of_pixels=line_hm[bucket_index][vi].size()*
+                area_after_expansion;
+                type_of_best_expansion='D';
+                best_expansion_ind={bucket_index, vi};
+              }
+            }
+          }
+
+          // Save the best expansion
+          if(type_of_best_expansion=='D')
+            best_expansion=line_hm[best_expansion_ind.first][best_expansion_ind.second];
+        }
+
+        // No suitable expansions were found
+        if(type_of_best_expansion=='X') {
+          // Discard all patches if too small
+          if(curr_width*curr_height<kMinPatchArea) {
+            for(auto p : coordinates) {
+              set_as_patch(p, curr_width, curr_height, 0);
+            }
+          }
+          // Keep the patches if big enough
+          else{
+            confirm_patch(coordinates, {curr_width, curr_height});
+          }
+        }
+
+        // Some expansion can be made and either the current patches are too small
+        // or the total number of pixels in patches can be increased
+        else if(curr_width*curr_height<kMinPatchArea ||
+                best_total_number_of_pixels>=curr_total_number_of_pixels){
+          // Separating the patches that were expanded from those that were not
+          std::vector<XY> expanded_patches, non_expanded_patches;
+          std::vector<bool> was_expanded(coordinates.size(), 0);
+          for(auto patch_info : best_expansion){
+            expanded_patches.push_back(patch_info.first);
+            was_expanded[patch_info.second]=1;
+          }
+          for(int i=0; i<coordinates.size(); i++){
+            if(!was_expanded[i]) non_expanded_patches.push_back(coordinates[i]);
+          }
+
+          // If the non expanded patches are a sufficient number, they are put back into the stack
+          if(non_expanded_patches.size()>=kMinPatchOccurences) {
+            identicalPatches.push({{curr_width, curr_height}, non_expanded_patches});
+          } else {
+            for(XY p : non_expanded_patches) {
+              set_as_patch(p, curr_width, curr_height, 0);
+            }
+          }
+
+          // Putting the expanded ones back in the stack to look for further expansions
+          XY expanded_dimensions={curr_width, curr_height};
+          if(type_of_best_expansion=='L' || type_of_best_expansion=='R') expanded_dimensions.first++;
+          else expanded_dimensions.second++;
+          identicalPatches.push({expanded_dimensions, expanded_patches});
+        }
+
+        // If no expansion can improve the current patches in terms of total pixels
+        // covered and they're sufficiently big, keep them
+        else{
+          confirm_patch(coordinates, {curr_width, curr_height});
+        }
+
+      }
+    }
+  }
+
   return info;
 }
   
