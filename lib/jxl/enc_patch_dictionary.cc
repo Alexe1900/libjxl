@@ -47,6 +47,12 @@
 #include "lib/jxl/pack_signed.h"
 #include "lib/jxl/patch_dictionary_internal.h"
 
+#include<iostream>
+#include<chrono>
+#include<queue>
+#include<set>
+#include<stack>
+
 namespace jxl {
 
 static constexpr size_t kPatchFrameReferenceId = 3;
@@ -227,12 +233,15 @@ struct PatchColorspaceInfo {
 
 using XY = std::pair<int32_t, int32_t>;
 constexpr const size_t kPatchSide = 4;
+constexpr const float kEpsilon = 1e-4;
 
 StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
     const CompressParams& cparams, const Image3F& opsin,
     const PassesEncoderState* JXL_RESTRICT state, ThreadPool* pool,
     AuxOut* aux_out, bool is_xyb) {
   
+  auto start = std::chrono::steady_clock::now();
+
   //future final result
   std::vector<PatchInfo> info;
 
@@ -682,6 +691,9 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
     info.clear();
   }
 
+  auto end = std::chrono::steady_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+  std::cout<<"duration: "<<duration.count()<<" ms"<<std::endl;
   return info;
 }
 
@@ -690,32 +702,287 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
   const PassesEncoderState* JXL_RESTRICT state, ThreadPool* pool,
   AuxOut* aux_out, bool is_xyb) {
 
+  auto start = std::chrono::steady_clock::now();
+
   std::vector<PatchInfo> info;
   if (state->cparams.patches == Override::kOff) return info;
+  auto frame_dim = state->shared.frame_dim;
+  PatchColorspaceInfo pci(is_xyb);
+  
+  const size_t opsin_stride = opsin.PixelsPerRow();
 
-  //...
-
-  float kEpsilon = 1e-4;
-
-  auto IntCast = [](float value, float epsilon) -> uint16_t {
-    return static_cast<uint16_t>(value/epsilon);
+  const float* JXL_RESTRICT opsin_rows[3] = {opsin.ConstPlaneRow(0, 0),
+                                             opsin.ConstPlaneRow(1, 0),
+                                             opsin.ConstPlaneRow(2, 0)};
+  
+  frame_dim.xsize++;
+  const auto pick = [&](const XY& p) -> Color {
+    if(p.first == (int)frame_dim.xsize - 1){
+      float n = - p.second - 1;
+      return {n,n,n};
+    }
+    int offset = p.second * opsin_stride + p.first;
+    return {opsin_rows[0][offset], opsin_rows[1][offset],
+            opsin_rows[2][offset]};
   };
 
-  auto HashSmallGrid = [&](std::array<std::array<Color,3>,3> sg, float epsilon) -> size_t {
-    size_t seed = 0;
-    std::hash<uint16_t> hasher;
-    for (size_t y=0; y<sg.size(); ++y) {
-      for (size_t x=0; x<sg[y].size(); ++x) {
-        for(size_t& c : {0,1,2}) {
-          seed ^= hasher(IntCast(sg[y][x][c],epsilon)) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+  auto are_colors_same = [](const Color c1, const Color c2) -> bool {
+    for (size_t i = 0; i < (int)c1.size(); ++i) {
+      if (std::fabs(c1[i] - c2[i]) > kEpsilon) {
+        return 0;
+      }
+    }
+    return 1;
+  };
+
+  auto confirm_patch = [&info, &opsin_rows, &pci, opsin_stride](std::vector<XY> coords, XY dimensions){
+    constexpr int kMinPeak = 2;
+    info.emplace_back();
+    for(XY c : coords) {
+      info.back().second.emplace_back(static_cast<uint32_t>(c.first),
+                                    static_cast<uint32_t>(c.second));
+    }
+    QuantizedPatch& patch = info.back().first;
+    patch.xsize = dimensions.first;
+    patch.ysize = dimensions.second;
+    bool too_big = false;
+    bool too_small = true;
+    for (size_t c : {1, 0, 2}) {
+      for (int32_t iy = coords[0].second; iy < coords[0].second+dimensions.second; iy++) {
+        for (int32_t ix = coords[0].first; ix < coords[0].first+dimensions.first; ix++) {
+          size_t offset = (iy - coords[0].second) * patch.xsize + ix - coords[0].first;
+          float fval = opsin_rows[c][iy * opsin_stride + ix];
+          patch.fpixels[c][offset] = fval;
+          int val = pci.Quantize(patch.fpixels[c][offset], c);
+          int8_t qval = static_cast<int8_t>(val);
+          patch.pixels[c][offset] = qval;
+          too_big |= (val != static_cast<int>(qval));
+          too_small &= (val < kMinPeak) && (val > -kMinPeak);
         }
       }
     }
-    return seed;
+    if (too_small || too_big) {
+      info.pop_back();
+    }
   };
 
-  //...
+  auto is_flat_patch = [&](XY p, int l) -> bool {
+    for(int i=1; i<l; i++){
+      if(!are_colors_same(pick(p),pick({p.first+i,p.second}))) return false;
+    }
+    return true;
+  };
 
+  auto xy_pos = [&](int p) -> XY {
+    return {p % frame_dim.xsize, p / frame_dim.xsize};
+  };
+
+  /*auto linear_pos = [&](XY p) -> int {
+    return p.second * frame_dim.xsize + p.first;
+  };*/
+
+  int tot_num_pixel = frame_dim.xsize * frame_dim.ysize;
+  const int min_area = 30;
+  const int max_depth = 8;
+
+  std::vector<int> sarr(tot_num_pixel), pos(tot_num_pixel), tmp(tot_num_pixel), invsarr(tot_num_pixel);
+
+  for (int i = 0; i < tot_num_pixel; i++) sarr[i] = i;
+  
+  sort(sarr.begin(), sarr.end(), [&](int i, int j) {
+    return pick(xy_pos(i)) < pick(xy_pos(j));
+  });
+
+  pos[sarr[0]] = 0;
+  for (int i = 1; i < tot_num_pixel; i++) {
+    Color c1 = pick(xy_pos(sarr[i - 1]));
+    Color c2 = pick(xy_pos(sarr[i]));
+    pos[sarr[i]] = pos[sarr[i - 1]] + (c1 < c2 ? 1 : 0);
+  }
+
+  int gap = 1;
+
+  const auto cmp = [&](int i, int j) {
+    if (pos[i] != pos[j]) return pos[i] < pos[j];
+    i += gap;
+    j += gap;
+    return (i < tot_num_pixel && j < tot_num_pixel) ? pos[i] < pos[j] : i > j;
+  };
+
+  for (;; gap *= 2) {
+    tmp[0]=0;
+    sort(sarr.begin(), sarr.end(), cmp);
+    for (int i = 0; i < tot_num_pixel - 1; i++) tmp[i + 1] = tmp[i] + cmp(sarr[i], sarr[i + 1]);
+    for (int i = 0; i < tot_num_pixel; i++) pos[sarr[i]] = tmp[i];
+    if (tmp[tot_num_pixel - 1] == tot_num_pixel - 1) break;
+  }
+
+  for (int i = 0; i < tot_num_pixel; i++) invsarr[sarr[i]] = i;
+
+  std::vector<int> lcp(tot_num_pixel - 1);
+
+  int k = 0;
+  for (int i = 0; i < tot_num_pixel; i++) {
+    if (invsarr[i] == tot_num_pixel - 1) {
+      k = 0;
+      continue;
+    }
+    int j = sarr[invsarr[i] + 1];
+    while (i + k < tot_num_pixel &&
+          j + k < tot_num_pixel &&
+          are_colors_same(pick(xy_pos(i + k)), pick(xy_pos(j + k))) ){
+      k++;
+    }
+    lcp[invsarr[i]] = k;
+    if (k > 0) k--;
+  }
+
+  for (int i = 0; i < tot_num_pixel - 1; i++) {
+    lcp[i] = std::min(lcp[i], std::abs(sarr[i] - sarr[i+1]));
+  }
+
+  std::vector<XY> patch_dimensions;
+  std::vector<std::vector<XY>> patch_positions;
+
+  std::set<int> leftEndpoints, rightEndpoints;
+
+  std::priority_queue<std::array<int,4>> Q;
+  Q.push({0,0,tot_num_pixel-1,max_depth});
+  while(!Q.empty()){
+
+    auto [z,l,r,d]=Q.top();
+    Q.pop();
+
+    if (d == 0 || (l >= r)) continue;
+
+    for (int i = l; i < r; i++) {
+      auto lep1 = leftEndpoints.lower_bound(sarr[i]);
+      auto rep1 = rightEndpoints.upper_bound(sarr[i]);
+      auto lep2 = leftEndpoints.lower_bound(sarr[i+1]);
+      auto rep2 = rightEndpoints.upper_bound(sarr[i+1]);
+
+      int constr1;
+      if (rep1 == rightEndpoints.end()){
+        constr1 = tot_num_pixel;
+      }else if(lep1 == leftEndpoints.end() || *rep1 <= *lep1){
+        constr1 = 0;
+      }else{
+        constr1 = *lep1 - sarr[i];
+      }
+
+      int constr2;
+      if (rep2 == rightEndpoints.end()){
+        constr2 = tot_num_pixel;
+      }else if(lep2 == leftEndpoints.end() || *rep2 <= *lep2){
+        constr2 = 0;
+      }else{
+        constr2 = *lep2 - sarr[i+1];
+      }
+
+      lcp[i] = std::min(lcp[i], std::min(constr1, constr2));
+    }
+
+    std::stack<int> st;
+    std::vector<int> toLeft(r - l), toRight(r - l);
+
+    for (int i = l; i < r; i++) {
+      while (!st.empty()) {
+        if (lcp[st.top()] >= lcp[i]) st.pop();
+        else break;
+      }
+
+      if (!st.empty()) toLeft[i - l] = st.top();
+      else toLeft[i - l] = l-1;
+
+      st.push(i);
+    }
+
+    st = {};
+    for (int i = r-1; i >= l; i--) {
+      while (!st.empty()) {
+        if (lcp[st.top()] >= lcp[i]) st.pop();
+        else break;
+      }
+
+      if (!st.empty()) toRight[i - l] = st.top();
+      else toRight[i - l] = r;
+
+      st.push(i);
+    }
+
+    int maxArea = 0, mal, mar, malen;
+    for (int i = l; i < r; i++) {
+      int area = (toRight[i - l] - toLeft[i - l]) * (lcp[i] - 1);
+
+      if (area > maxArea) {
+        maxArea = area;
+        mal = toLeft[i - l] + 1;
+        mar = toRight[i - l];
+        malen = lcp[i];
+      }
+    }
+
+    if (maxArea < min_area) continue;
+
+    patch_dimensions.push_back({malen,1});
+    patch_positions.push_back({});
+
+    std::vector<int> k;
+
+    for(int i=mal; i<=mar; i++){
+      k.push_back(sarr[i]);
+    }
+    sort(k.begin(),k.end());
+    int x=-1;
+    for (int i = mal; i <= mar; i++) {
+      if(k[i-mal]>=x){
+        patch_positions.back().push_back(xy_pos(k[i-mal]));
+        leftEndpoints.insert(k[i-mal]);
+        rightEndpoints.insert(k[i-mal]+malen);
+        x=k[i-mal]+malen;
+      }
+    }
+    for(int i=0; i<patch_dimensions.back().first; i+=kMaxPatchSize){
+      XY p = {std::min((int)kMaxPatchSize, patch_dimensions.back().first-i),patch_dimensions.back().second};
+      if(!is_flat_patch(patch_positions.back()[0], p.first)){
+        confirm_patch(patch_positions.back(), p);
+      }
+      for(int j=0; j<(int)patch_positions.back().size(); j++){
+        patch_positions.back()[j].first+=kMaxPatchSize;
+      }
+    }
+    
+    Q.push({-maxArea, l, mal, d-1});
+    Q.push({-maxArea, mar, r, d-1});
+  }
+  
+  /*int tot=ranges.size();
+  std::vector<bool> valid(ranges.size(),true);
+  for(int i=0; i<(int)ranges.size(); i++){
+    if(is_flat_patch(xy_pos(ranges[i].first),ranges[i].second-ranges[i].first)){
+      valid[i]=false;
+      tot--;
+    }
+  }
+  std::cout<<"patches: "<<tot<<std::endl;
+  int ta=0;
+  for(int i=0; i<(int)ranges.size(); i++){
+    if(!valid[i]) continue;
+    ta += (ranges[i].second - ranges[i].first) * occurences[i].size();
+  }
+  std::cout<<"total area: "<<ta<<" / "<<tot_num_pixel<<std::endl;
+  int w=100;
+  for(int i=0; i<(int)ranges.size(); i++){
+    if(!valid[i]) continue;
+    w--;
+    if(w<0) break;
+    std::cout<<"length: "<<ranges[i].second - ranges[i].first<<" ";
+    std::cout<<"copies: "<<occurences[i].size()<<" ";
+    std::cout<<std::endl;
+  }*/
+  auto end = std::chrono::steady_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+  std::cout<<"duration: "<<duration.count()<<" ms"<<std::endl;
   return info;
 }
 
@@ -725,9 +992,17 @@ Status FindBestPatchDictionary(const Image3F& opsin,
                                PassesEncoderState* JXL_RESTRICT state,
                                const JxlCmsInterface& cms, ThreadPool* pool,
                                AuxOut* aux_out, bool is_xyb) {
-  JXL_ASSIGN_OR_RETURN(
-      std::vector<PatchInfo> info,
+  std::vector<PatchInfo> info;
+  if (state->cparams.butteraugli_distance == 0) {
+    JXL_ASSIGN_OR_RETURN(
+      info,
+      FindTextLikePatchesLossless(state->cparams, opsin, state, pool, aux_out, is_xyb));
+  }
+  else{
+    JXL_ASSIGN_OR_RETURN(
+      info,
       FindTextLikePatches(state->cparams, opsin, state, pool, aux_out, is_xyb));
+  }
   JxlMemoryManager* memory_manager = opsin.memory_manager();
 
   // TODO(veluca): this doesn't work if both dots and patches are enabled.
