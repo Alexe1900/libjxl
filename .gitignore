@@ -24,8 +24,3 @@ tools/conformance/__pycache__
 
 # macOS Finder state files
 .DS_Store
-
-Veluca's images
-benchmark
-out.jxl
-rgb16bit
