@@ -41,6 +41,14 @@ struct QuantizedPatch {
       fpixels[i].resize(kMaxPatchSize * kMaxPatchSize);
     }
   }
+
+  QuantizedPatch(size_t x, size_t y) {
+    xsize=x, ysize=y;
+    for (size_t i = 0; i < 3; i++) {
+      fpixels[i].resize(x * y);
+    }
+  }
+
   std::vector<int8_t> pixels[3] = {};
   // Not compared. Used only to retrieve original pixels to construct the
   // reference image.

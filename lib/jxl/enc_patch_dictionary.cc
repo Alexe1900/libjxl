@@ -617,22 +617,99 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
 
 }  // namespace
 
-
 StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
     const CompressParams& cparams, const Image3F& opsin,
     const PassesEncoderState* JXL_RESTRICT state, ThreadPool* pool,
     AuxOut* aux_out, bool is_xyb) {
+    PatchColorspaceInfo pci(is_xyb);
+    const auto& frame_dim = state->shared.frame_dim;
+    const float* JXL_RESTRICT opsin_rows[3] = {opsin.ConstPlaneRow(0, 0),
+                                             opsin.ConstPlaneRow(1, 0),
+                                             opsin.ConstPlaneRow(2, 0)};
+    const size_t opsin_stride = opsin.PixelsPerRow();
     std::vector<PatchInfo> info;
-    return info;
-  }
+
+    auto confirm_patch = [&info, &opsin_rows, &pci, &frame_dim, opsin_stride]
+                          (std::vector<XY> coords, XY dimensions){
+      constexpr int kMinPeak = 2;
+      std::array<std::vector<float>, 3> colors;
+      info.emplace_back(QuantizedPatch(dimensions.first, dimensions.second),
+                        std::vector<std::pair<uint32_t, uint32_t>>());
+      // For each identical patch...
+      for(XY c : coords) {
+        info.back().second.emplace_back(static_cast<uint32_t>(c.first),
+                                      static_cast<uint32_t>(c.second));
+        // Finding the median color with which to replace patches
+        if(c.first>0) {
+          for(size_t iy=c.second; iy<c.second+dimensions.second; iy++) {
+            for(int i=0; i<3; i++) {
+              colors[i].push_back(opsin_rows[i][iy*opsin_stride+(c.first-1)]);
+            }
+          }
+        }
+        if(c.first+dimensions.first<frame_dim.xsize) {
+          for(size_t iy=c.second; iy<c.second+dimensions.second; iy++) {
+            for(int i=0; i<3; i++) {
+              colors[i].push_back(opsin_rows[i][iy*opsin_stride+(c.first+dimensions.first)]);
+            }
+          }
+        }
+        if(c.second>0) {
+          for(size_t ix=c.first; ix<c.first+dimensions.first; ix++) {
+            for(int i=0; i<3; i++) {
+              colors[i].push_back(opsin_rows[i][(c.second-1)*opsin_stride+ix]);
+            }
+          }
+        }
+        if(c.second+dimensions.second<frame_dim.ysize){
+          for(size_t ix=c.first; ix<c.first+dimensions.first; ix++) {
+            for(int i=0; i<3; i++) {
+              colors[i].push_back(opsin_rows[i][(c.second+dimensions.second)*opsin_stride+ix]);
+            }
+          }
+        }
+      }
+      for(auto v : colors) sort(v.begin(), v.end());
+      Color ref={
+        colors[0][colors[0].size()/2],
+        colors[1][colors[1].size()/2],
+        colors[2][colors[2].size()/2],
+      };
+      QuantizedPatch& patch = info.back().first;
+      patch.xsize = dimensions.first;
+      patch.ysize = dimensions.second;
+      bool too_big = false;
+      bool too_small = true;
+      for (size_t c : {1, 0, 2}) {
+        for (size_t iy = coords[0].second; iy < coords[0].second+dimensions.second; iy++) {
+          for (size_t ix = coords[0].first; ix < coords[0].first+dimensions.first; ix++) {
+            size_t offset = (iy - coords[0].second) * patch.xsize + ix - coords[0].first;
+            float fval = opsin_rows[c][iy * opsin_stride + ix]-ref[c];
+            patch.fpixels[c][offset] = fval;
+            int val = pci.Quantize(patch.fpixels[c][offset], c);
+            int8_t qval = static_cast<int8_t>(val);
+            patch.pixels[c][offset] = qval;
+            too_big |= (val != static_cast<int>(qval));
+            too_small &= (val < kMinPeak) && (val > -kMinPeak);
+          }
+        }
+      }
+      if (too_small || too_big) {
+        info.pop_back();
+      }
+    };
+
+  return info;
+}
 
 
 Status FindBestPatchDictionary(const Image3F& opsin,
                                PassesEncoderState* JXL_RESTRICT state,
                                const JxlCmsInterface& cms, ThreadPool* pool,
                                AuxOut* aux_out, bool is_xyb) {
+  bool isLossless=(state->cparams.butteraugli_distance == 0);
   std::vector<PatchInfo> info;
-  if (state->cparams.butteraugli_distance == 0) {
+  if (0) {
     JXL_ASSIGN_OR_RETURN(
       info,
       FindTextLikePatchesLossless(state->cparams, opsin, state, pool, aux_out, is_xyb));
