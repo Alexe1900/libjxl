@@ -47,13 +47,12 @@
 #include "lib/jxl/pack_signed.h"
 #include "lib/jxl/patch_dictionary_internal.h"
 
-#include<iostream>
-#include<chrono>
 #include<queue>
 #include<set>
 #include<stack>
-#include<fstream>
-#include<cmath>
+//#include<iostream>
+//#include<chrono>
+//#include<fstream>
 
 namespace jxl {
 
@@ -242,7 +241,7 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
     const PassesEncoderState* JXL_RESTRICT state, ThreadPool* pool,
     AuxOut* aux_out, bool is_xyb) {
   
-  auto start = std::chrono::steady_clock::now();
+  //auto start = std::chrono::steady_clock::now();
 
   //future final result
   std::vector<PatchInfo> info;
@@ -693,9 +692,9 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatches(
     info.clear();
   }
 
-  auto end = std::chrono::steady_clock::now();
-  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-  std::cout<<"duration: "<<duration.count()<<" ms"<<std::endl;
+  //auto end = std::chrono::steady_clock::now();
+  //auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+  //std::cout<<"duration: "<<duration.count()<<" ms"<<std::endl;
   return info;
 }
 
@@ -716,14 +715,30 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
   int kMinPatchLength = 5;
   int kMaxDepth = 20;
   float kMinEntropy = 1;
-  /*std::cout<<"Max depth: ";
+  /*
+  std::cout<<"Max depth: ";
   std::cin>>kMaxDepth;
   std::cout<<"Min patch length: ";
   std::cin>>kMinPatchLength;
   std::cout<<"Min entropy: ";
-  std::cin>>kMinEntropy;*/
+  std::cin>>kMinEntropy;
+  */
 
-  //std::vector<std::vector<std::array<int,3>>> patches_debug(frame_dim.ysize,std::vector<std::array<int,3>>(frame_dim.xsize));
+  /*
+  enum DebugPixelState{
+    NotDetected,
+    UsedPatch,
+    StartUsedPatch,
+    EndUsedPatch,
+    SmallPatch,
+    FlatPatch,
+    Error
+  };
+  std::vector<std::vector<DebugPixelState>> debug_image_patches(
+    frame_dim.ysize,
+    std::vector<DebugPixelState>(frame_dim.xsize,NotDetected)
+  );
+  */
 
   const auto pick = [&](const XY& p) -> Color {
     if(p.first >= frame_dim.xsize){
@@ -734,17 +749,6 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
     return {opsin_rows[0][offset], opsin_rows[1][offset],
             opsin_rows[2][offset]};
   };
-
-  /*for(int y=0; y<frame_dim.ysize; y++){
-    for(int x=0; x<frame_dim.xsize; x++){
-      std::array<int,3> a;
-      Color col = pick({x,y});
-      for(int c=0; c<3; c++){
-        a[c] = col[c]*256;
-      }
-      patches_debug[y][x] = a;
-    }
-  }*/
 
   const auto are_colors_same = [](const Color& c1, const Color& c2) -> bool {
     for (int i = 0; i < (int)c1.size(); ++i) {
@@ -796,6 +800,14 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
     return true;
   };*/
 
+  std::vector<std::vector<Color>> image_with_patches_removed(frame_dim.ysize,
+                                                            std::vector<Color>(frame_dim.xsize));
+  for(int y=0; y<frame_dim.ysize; y++){
+    for(int x=0; x<frame_dim.xsize; x++){
+      image_with_patches_removed[y][x]=pick({x, y});
+    }
+  }
+
   const auto confirm_patch = [&](const std::vector<XY>& coords, const XY& dimensions){
     constexpr int kMinPeak = 2;
     std::array<std::vector<float>, 3> colors;
@@ -808,28 +820,28 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
       if(c.first>0) {
         for(size_t iy=c.second; iy<c.second+dimensions.second; iy++) {
           for(int i=0; i<3; i++) {
-            colors[i].push_back(opsin_rows[i][iy*opsin_stride+(c.first-1)]);
+            colors[i].push_back(image_with_patches_removed[iy][c.first-1][i]);
           }
         }
       }
       if(c.first+dimensions.first<frame_dim.xsize) {
         for(size_t iy=c.second; iy<c.second+dimensions.second; iy++) {
           for(int i=0; i<3; i++) {
-            colors[i].push_back(opsin_rows[i][iy*opsin_stride+(c.first+dimensions.first)]);
+            colors[i].push_back(image_with_patches_removed[iy][c.first+dimensions.first][i]);
           }
         }
       }
       if(c.second>0) {
         for(size_t ix=c.first; ix<c.first+dimensions.first; ix++) {
           for(int i=0; i<3; i++) {
-            colors[i].push_back(opsin_rows[i][(c.second-1)*opsin_stride+ix]);
+            colors[i].push_back(image_with_patches_removed[c.second-1][ix][i]);
           }
         }
       }
       if(c.second+dimensions.second<frame_dim.ysize){
         for(size_t ix=c.first; ix<c.first+dimensions.first; ix++) {
           for(int i=0; i<3; i++) {
-            colors[i].push_back(opsin_rows[i][(c.second+dimensions.second)*opsin_stride+ix]);
+            colors[i].push_back(image_with_patches_removed[c.second+dimensions.second][ix][i]);
           }
         }
       }
@@ -840,21 +852,7 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
       colors[1][colors[1].size()/2],
       colors[2][colors[2].size()/2],
     };
-
-    //debug
-    /*std::array<int,3> a;
-    for(int c=0; c<5; c++){
-      a[c] = ref[c]*256;
-    }
-
-    for(int i=0; i<coords.size(); i++){
-      for(int y=0; y<dimensions.second; y++){
-        for(int x=0; x<dimensions.first; x++){
-          patches_debug[coords[i].second + y][coords[i].first + x] = a;
-        }
-      }
-    }*/
-
+    
     QuantizedPatch& patch = info.back().first;
     patch.xsize = dimensions.first;
     patch.ysize = dimensions.second;
@@ -876,42 +874,47 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
     }
     if (too_small || too_big) {
       info.pop_back();
+      /*for(int i=0; i<(int)coords.size(); i++){
+        for(int x=0; x<dimensions.first; x++){
+          debug_image_patches[coords[i].second][coords[i].first + x] = Error;
+        }
+      }*/
+      return;
+    }
+    for(const XY& c:coords){
+      for (size_t iy = c.second; iy < c.second+dimensions.second; iy++) {
+        for (size_t ix = c.first; ix < c.first+dimensions.first; ix++) {
+          image_with_patches_removed[iy][ix]=ref;
+        }
+      }
     }
   };
   
-  const auto divide_patch_and_confirm = [&](std::vector<XY> coords, const XY& dimensions){
-    for(int i=0; i<=dimensions.first; i+=kMaxPatchSize){
-      if(i!=0){
-        for(int j=0; j<(int)coords.size(); j++){
-          coords[j].first += kMaxPatchSize;
-        }
-      }
-      XY dim = {std::min((int)kMaxPatchSize, dimensions.first - i), dimensions.second};
-      if(dim.first < kMinPatchLength){
-        /*for(int j=0; j<(int)coords.size(); j++){
-          for(int x=0; x<pos.first; x++){
-            patches_debug[coords[j].second][coords[j].first + x] = 4;
-          }
-        }*/
-        continue;
-      }
-      if(patch_entropy(coords[0],dim) < kMinEntropy){
-        /*for(int j=0; j<(int)coords.size(); j++){
-          for(int x=0; x<pos.first; x++){
-            patches_debug[coords[j].second][coords[j].first + x] = 3;
-          }
-        }*/
-        continue;
-      }
-      confirm_patch(coords, dim);
+  const auto check_and_confirm_patch = [&](const std::vector<XY>& coords, const XY& dimensions){
+    if(dimensions.first < kMinPatchLength){
       /*for(int j=0; j<(int)coords.size(); j++){
-        patches_debug[coords[j].second][coords[j].first] = 0;
-        for(int x=1; x<pos.first-1; x++){
-          patches_debug[coords[j].second][coords[j].first + x] = 1;
+        for(int x=0; x<dimensions.first; x++){
+          debug_image_patches[coords[j].second][coords[j].first + x] = SmallPatch;
         }
-        patches_debug[coords[j].second][coords[j].first + pos.first-1] = 2;
       }*/
+      return;
     }
+    if(patch_entropy(coords[0],dimensions) < kMinEntropy){
+      /*for(int j=0; j<(int)coords.size(); j++){
+        for(int x=0; x<dimensions.first; x++){
+          debug_image_patches[coords[j].second][coords[j].first + x] = FlatPatch;
+        }
+      }*/
+      return;
+    }
+    confirm_patch(coords, dimensions);
+    /*for(int j=0; j<(int)coords.size(); j++){
+      debug_image_patches[coords[j].second][coords[j].first] = StartUsedPatch;
+      for(int x=1; x<dimensions.first-1; x++){
+        debug_image_patches[coords[j].second][coords[j].first + x] = UsedPatch;
+      }
+      debug_image_patches[coords[j].second][coords[j].first + dimensions.first-1] = EndUsedPatch;
+    }*/
   };
 
   const auto xy_pos = [&](const int& pos, const int& x_size) -> XY {
@@ -920,7 +923,7 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
 
   auto suffix_array = [&](int tot_size, int x_size) -> std::vector<int> {
 
-    std::vector<int> sarr(tot_size), pos(tot_size), tmp(tot_size);
+    std::vector<int> sarr(tot_size), rank(tot_size), tmp(tot_size);
 
     for (int i = 0; i < tot_size; i++) sarr[i] = i;
 
@@ -928,27 +931,27 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
       return pick(xy_pos(i,x_size)) < pick(xy_pos(j,x_size));
     });
 
-    pos[sarr[0]] = 0;
+    rank[sarr[0]] = 0;
     for (int i = 1; i < tot_size; i++) {
       Color c1 = pick(xy_pos(sarr[i - 1],x_size));
       Color c2 = pick(xy_pos(sarr[i],x_size));
-      pos[sarr[i]] = pos[sarr[i - 1]] + (c1 < c2);
+      rank[sarr[i]] = rank[sarr[i - 1]] + (c1 < c2);
     }
 
     int gap = 1;
 
     const auto cmp = [&](int i, int j) {
-      if (pos[i] != pos[j]) return pos[i] < pos[j];
+      if (rank[i] != rank[j]) return rank[i] < rank[j];
       i += gap;
       j += gap;
-      return (i < tot_size && j < tot_size) ? pos[i] < pos[j] : i > j;
+      return (i < tot_size && j < tot_size) ? rank[i] < rank[j] : i > j;
     };
 
     for (;; gap *= 2) {
       tmp[0]=0;
       sort(sarr.begin(), sarr.end(), cmp);
       for (int i = 0; i < tot_size - 1; i++) tmp[i + 1] = tmp[i] + cmp(sarr[i], sarr[i + 1]);
-      for (int i = 0; i < tot_size; i++) pos[sarr[i]] = tmp[i];
+      for (int i = 0; i < tot_size; i++) rank[sarr[i]] = tmp[i];
       if (tmp[tot_size - 1] == tot_size - 1) break;
     }
 
@@ -959,7 +962,7 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
   int y_size = frame_dim.ysize;
   int tot_num_pixel = x_size * y_size;
 
-  auto start_time = std::chrono::steady_clock::now();
+  //auto start_time = std::chrono::steady_clock::now();
 
   std::vector<int> sarr(tot_num_pixel);
   sarr = suffix_array(tot_num_pixel, x_size);
@@ -1072,7 +1075,6 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
     if(max_area == 0) continue;
     if (length < kMinPatchLength) continue;
 
-
     patch_length.push_back(length);
     patch_positions.push_back({});
 
@@ -1103,41 +1105,47 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
       continue;
     }
 
-    divide_patch_and_confirm(patch_positions.back(),{patch_length.back(),1});
-
     std::array<int,4> a = {max_area_left - l, l, max_area_left, d-1};
     std::array<int,4> b = {r - max_area_right, max_area_right, r, d-1};
-    //if(max_area_left - l < r - max_area_right) swap(a,b);
     queue.push(a);
     queue.push(b);
   }
+  int num_patch = patch_length.size();
+  for(int i=0; i<num_patch; i++){
+    check_and_confirm_patch(patch_positions[i],{patch_length[i],1});
+  }
 
-  auto end_time = std::chrono::steady_clock::now();
-  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+  //auto end_time = std::chrono::steady_clock::now();
+  //auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
   //std::cout<<"duration: "<<duration.count()<<" ms"<<std::endl;
 
-  /*std::ofstream debug_image("_path_/patches.ppm");
-
+  /*
+  std::ofstream debug_image("_path_/debug1.ppm");
+  std::ofstream debug_image2("_path_/debug2.ppm");
   debug_image<<"P3\n"<<frame_dim.xsize<<" "<<frame_dim.ysize<<"\n"<<"255\n";
+  debug_image2<<"P3\n"<<frame_dim.xsize<<" "<<frame_dim.ysize<<"\n"<<"255\n";
   for(size_t y=0; y<frame_dim.ysize; y++){
     for(size_t x=0; x<frame_dim.xsize; x++){
-      //switch(patches_debug[y][x]){
-      //  case -1: debug_image<<"255 255 255 "; break;
-      //  case 0: debug_image<<"0 0 255 "; break;
-      //  case 1: debug_image<<"0 0 0 "; break;
-      //  case 2: debug_image<<"255 0 0 "; break;
-      //  case 3: debug_image<<"0 255 0 "; break;
-      /7  case 4: debug_image<<"255 255 0 "; break;
-      //}
-     for(int c=0; c<3; c++){
-      debug_image << std::clamp(patches_debug[y][x][c],0,255) << " ";
-     }
+      switch(debug_image_patches[y][x]){
+        case NotDetected: debug_image2<<"255 255 255 "; break;
+        case UsedPatch: debug_image2<<"0 0 0 "; break;
+        case StartUsedPatch: debug_image2<<"0 0 255 "; break;
+        case EndUsedPatch: debug_image2<<"0 0 0 "; break;
+        case SmallPatch: debug_image2<<"255 255 0 "; break;
+        case FlatPatch: debug_image2<<"0 255 0 "; break;
+        default: debug_image2<<"255 0 0 "; break;
+      }
+      for(int c=0; c<3; c++){
+        debug_image << std::clamp((int)(image_with_patches_removed[y][x][c]*256),0,255) << " ";
+      }
     }
     debug_image<<"\n";
+    debug_image2<<"\n";
   }
   debug_image.close();
-  std::cout<<"debug image created"<<std::endl;*/
-
+  debug_image2.close();
+  std::cout<<"- debug images created"<<std::endl;
+  */
   return info;
 }
 
