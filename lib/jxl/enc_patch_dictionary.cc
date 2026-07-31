@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <random>
 #include <utility>
 #include <vector>
 
@@ -712,9 +713,9 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
                                              opsin.ConstPlaneRow(1, 0),
                                              opsin.ConstPlaneRow(2, 0)};
   
-  int kMinPatchLength = 5;
-  int kMaxDepth = 20;
-  float kMinEntropy = 1;
+  constexpr const size_t kMinPatchLength = 5;
+  constexpr const size_t kMaxDepth = 10;
+  constexpr const float kMinEntropy = 1;
   /*
   std::cout<<"Max depth: ";
   std::cin>>kMaxDepth;
@@ -745,13 +746,13 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
       float n = - p.second - 1;
       return {n,n,n};
     }
-    int offset = p.second * opsin_stride + p.first;
+    size_t offset = p.second * opsin_stride + p.first;
     return {opsin_rows[0][offset], opsin_rows[1][offset],
             opsin_rows[2][offset]};
   };
 
   const auto are_colors_same = [](const Color& c1, const Color& c2) -> bool {
-    for (int i = 0; i < (int)c1.size(); ++i) {
+    for (size_t i = 0; i < c1.size(); ++i) {
       if (std::fabs(c1[i] - c2[i]) > kEpsilon) {
         return 0;
       }
@@ -761,8 +762,8 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
 
   const auto patch_entropy = [&](XY pos, XY dim) -> float {
     std::array<std::vector<float>,3> col;
-    for(int y=0; y<dim.second; y++){
-      for(int x=0; x<dim.first; x++){
+    for(size_t y=0; y<dim.second; y++){
+      for(size_t x=0; x<dim.first; x++){
         Color c=pick({pos.first+x, pos.second+y});
         for(size_t i=0; i<3; i++){
           col[i].push_back(c[i]);
@@ -770,9 +771,9 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
       }
     }
     Color median;
-    for(int i=0; i<3; i++){
+    for(size_t i=0; i<3; i++){
       sort(col[i].begin(),col[i].end());
-      int pixels=col[i].size();
+      size_t pixels=col[i].size();
       if(pixels & 1){
         median[i] = col[i][pixels/2];
       }else{
@@ -780,10 +781,10 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
       }
     }
     float entropy = 0;
-    for(int y=0; y<dim.second; y++){
-      for(int x=0; x<dim.first; x++){
+    for(size_t y=0; y<dim.second; y++){
+      for(size_t x=0; x<dim.first; x++){
         Color c=pick({pos.first+x, pos.second+y});
-        for(int i=0; i<3; i++){
+        for(size_t i=0; i<3; i++){
           entropy += std::log2(1+std::abs(c[i] - median[i]));
         }
       }
@@ -802,14 +803,14 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
 
   std::vector<std::vector<Color>> image_with_patches_removed(frame_dim.ysize,
                                                             std::vector<Color>(frame_dim.xsize));
-  for(int y=0; y<frame_dim.ysize; y++){
-    for(int x=0; x<frame_dim.xsize; x++){
+  for(size_t y=0; y<frame_dim.ysize; y++){
+    for(size_t x=0; x<frame_dim.xsize; x++){
       image_with_patches_removed[y][x]=pick({x, y});
     }
   }
 
   const auto confirm_patch = [&](const std::vector<XY>& coords, const XY& dimensions){
-    constexpr int kMinPeak = 2;
+    constexpr const size_t kMinPeak = 2;
     std::array<std::vector<float>, 3> colors;
     info.push_back({QuantizedPatch(dimensions.first, dimensions.second),{}});
     // For each identical patch...
@@ -819,28 +820,28 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
       // Finding the median color with which to replace patches
       if(c.first>0) {
         for(size_t iy=c.second; iy<c.second+dimensions.second; iy++) {
-          for(int i=0; i<3; i++) {
+          for(size_t i=0; i<3; i++) {
             colors[i].push_back(image_with_patches_removed[iy][c.first-1][i]);
           }
         }
       }
       if(c.first+dimensions.first<frame_dim.xsize) {
         for(size_t iy=c.second; iy<c.second+dimensions.second; iy++) {
-          for(int i=0; i<3; i++) {
+          for(size_t i=0; i<3; i++) {
             colors[i].push_back(image_with_patches_removed[iy][c.first+dimensions.first][i]);
           }
         }
       }
       if(c.second>0) {
         for(size_t ix=c.first; ix<c.first+dimensions.first; ix++) {
-          for(int i=0; i<3; i++) {
+          for(size_t i=0; i<3; i++) {
             colors[i].push_back(image_with_patches_removed[c.second-1][ix][i]);
           }
         }
       }
       if(c.second+dimensions.second<frame_dim.ysize){
         for(size_t ix=c.first; ix<c.first+dimensions.first; ix++) {
-          for(int i=0; i<3; i++) {
+          for(size_t i=0; i<3; i++) {
             colors[i].push_back(image_with_patches_removed[c.second+dimensions.second][ix][i]);
           }
         }
@@ -917,30 +918,30 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
     }*/
   };
 
-  const auto xy_pos = [&](const int& pos, const int& x_size) -> XY {
+  const auto xy_pos = [&](const size_t& pos, const size_t& x_size) -> XY {
     return {pos % x_size, pos / x_size};
   };
 
-  auto suffix_array = [&](int tot_size, int x_size) -> std::vector<int> {
+  auto suffix_array = [&](size_t tot_size, size_t x_size) -> std::vector<size_t> {
 
-    std::vector<int> sarr(tot_size), rank(tot_size), tmp(tot_size);
+    std::vector<size_t> sarr(tot_size), rank(tot_size), tmp(tot_size);
 
-    for (int i = 0; i < tot_size; i++) sarr[i] = i;
+    for (size_t i = 0; i < tot_size; i++) sarr[i] = i;
 
-    sort(sarr.begin(), sarr.end(), [&](int i, int j) {
+    sort(sarr.begin(), sarr.end(), [&](size_t i, size_t j) {
       return pick(xy_pos(i,x_size)) < pick(xy_pos(j,x_size));
     });
 
     rank[sarr[0]] = 0;
-    for (int i = 1; i < tot_size; i++) {
+    for (size_t i = 1; i < tot_size; i++) {
       Color c1 = pick(xy_pos(sarr[i - 1],x_size));
       Color c2 = pick(xy_pos(sarr[i],x_size));
       rank[sarr[i]] = rank[sarr[i - 1]] + (c1 < c2);
     }
 
-    int gap = 1;
+    size_t gap = 1;
 
-    const auto cmp = [&](int i, int j) {
+    const auto cmp = [&](size_t i, size_t j) {
       if (rank[i] != rank[j]) return rank[i] < rank[j];
       i += gap;
       j += gap;
@@ -950,30 +951,29 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
     for (;; gap *= 2) {
       tmp[0]=0;
       sort(sarr.begin(), sarr.end(), cmp);
-      for (int i = 0; i < tot_size - 1; i++) tmp[i + 1] = tmp[i] + cmp(sarr[i], sarr[i + 1]);
-      for (int i = 0; i < tot_size; i++) rank[sarr[i]] = tmp[i];
+      for (size_t i = 0; i < tot_size - 1; i++) tmp[i + 1] = tmp[i] + cmp(sarr[i], sarr[i + 1]);
+      for (size_t i = 0; i < tot_size; i++) rank[sarr[i]] = tmp[i];
       if (tmp[tot_size - 1] == tot_size - 1) break;
     }
 
     return sarr;
   };
 
-  int x_size = frame_dim.xsize+1;
-  int y_size = frame_dim.ysize;
-  int tot_num_pixel = x_size * y_size;
+  size_t x_size = frame_dim.xsize+1;
+  size_t y_size = frame_dim.ysize;
+  size_t tot_num_pixel = x_size * y_size;
 
   //auto start_time = std::chrono::steady_clock::now();
 
-  std::vector<int> sarr(tot_num_pixel);
+  std::vector<size_t> sarr(tot_num_pixel);
   sarr = suffix_array(tot_num_pixel, x_size);
 
-  std::vector<int> invsarr(tot_num_pixel);
-  for (int i = 0; i < tot_num_pixel; i++) invsarr[sarr[i]] = i;
+  std::vector<size_t> invsarr(tot_num_pixel);
+  for (size_t i = 0; i < tot_num_pixel; i++) invsarr[sarr[i]] = i;
+  std::vector<size_t> lcp(tot_num_pixel - 1);
 
-  std::vector<int> lcp(tot_num_pixel - 1);
-
-  int k = 0;
-  for (int i = 0; i < tot_num_pixel; i++) {
+  size_t k = 0;
+  for (size_t i = 0; i < tot_num_pixel; i++) {
     if (invsarr[i] == tot_num_pixel - 1) {
       k = 0;
       continue;
@@ -987,14 +987,14 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
     if (k > 0) k--;
   }
 
-  for (int i = 0; i < tot_num_pixel - 1; i++) {
-    lcp[i] = std::min(lcp[i], std::abs(sarr[i] - sarr[i+1]));
+  for (size_t i = 0; i < tot_num_pixel - 1; i++) {
+    lcp[i] = std::min(lcp[i], (size_t)std::abs((int)sarr[i] - (int)sarr[i+1]));
   }
 
-  std::vector<int> patch_length;
+  std::vector<size_t> patch_length;
   std::vector<std::vector<XY>> patch_positions;
-  std::set<int> Startpoints, Endpoints;
-  std::priority_queue<std::array<int,4>> queue;
+  std::set<size_t> Startpoints, Endpoints;
+  std::priority_queue<std::array<size_t,4>> queue;
   
   queue.push({0, 0, tot_num_pixel-1, kMaxDepth});
 
@@ -1005,13 +1005,13 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
 
     if (d == 0 || l >= r) continue;
 
-    for (int i = l; i < r; i++) {
+    for (size_t i = l; i < r; i++) {
       auto sp1 = Startpoints.lower_bound(sarr[i]);
       auto ep1 = Endpoints.upper_bound(sarr[i]);
       auto sp2 = Startpoints.lower_bound(sarr[i+1]);
       auto ep2 = Endpoints.upper_bound(sarr[i+1]);
 
-      int tmp1;
+      size_t tmp1;
       if (ep1 == Endpoints.end()){
         tmp1 = tot_num_pixel;
       }else if(sp1 == Startpoints.end() || *ep1 <= *sp1){
@@ -1020,7 +1020,7 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
         tmp1 = *sp1 - sarr[i];
       }
 
-      int tmp2;
+      size_t tmp2;
       if (ep2 == Endpoints.end()){
         tmp2 = tot_num_pixel;
       }else if(sp2 == Startpoints.end() || *ep2 <= *sp2){
@@ -1032,10 +1032,10 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
       lcp[i] = std::min(lcp[i], std::min(tmp1, tmp2));
     }
 
-    std::stack<int> st;
+    std::stack<size_t> st;
     std::vector<int> left_smaller(r - l), right_smaller(r - l);
 
-    for (int i = l; i < r; i++) {
+    for (size_t i = l; i < r; i++) {
       while (!st.empty()) {
         if (lcp[st.top()] >= lcp[i]) st.pop();
         else break;
@@ -1048,7 +1048,7 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
     }
 
     st = {};
-    for (int i = r-1; i >= l; i--) {
+    for (int i = r-1; i >= (int)l; i--) {
       while (!st.empty()) {
         if (lcp[st.top()] >= lcp[i]) st.pop();
         else break;
@@ -1060,9 +1060,9 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
       st.push(i);
     }
 
-    int max_area = 0, max_area_left=0, max_area_right=0, length=0;
-    for (int i = l; i < r; i++) {
-      int area = (right_smaller[i - l] - left_smaller[i - l]) * (lcp[i] - 1);
+    size_t max_area = 0, length=0, max_area_left=0, max_area_right=0;
+    for (size_t i = l; i < r; i++) {
+      size_t area = (right_smaller[i - l] - left_smaller[i - l]) * lcp[i];
 
       if (area > max_area) {
         max_area = area;
@@ -1078,18 +1078,18 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
     patch_length.push_back(length);
     patch_positions.push_back({});
 
-    std::vector<int> positions;
+    std::vector<size_t> positions;
 
-    for(int i=max_area_left; i<=max_area_right; i++){
+    for(size_t i=max_area_left; i<=max_area_right; i++){
       positions.push_back(sarr[i]);
     }
 
     sort(positions.begin(),positions.end());
 
-    int x =- 1;
-    int occurences = 0;
-    for (int i = max_area_left; i <= max_area_right; i++) {
-      int pos = positions[i - max_area_left];
+    int x = -1;
+    size_t occurences = 0;
+    for (size_t i = max_area_left; i <= max_area_right; i++) {
+      size_t pos = positions[i - max_area_left];
       if(pos >= x){
         occurences++;
         patch_positions.back().push_back(xy_pos(pos, x_size));
@@ -1105,14 +1105,207 @@ StatusOr<std::vector<PatchInfo>> FindTextLikePatchesLossless(
       continue;
     }
 
-    std::array<int,4> a = {max_area_left - l, l, max_area_left, d-1};
-    std::array<int,4> b = {r - max_area_right, max_area_right, r, d-1};
+    std::array<size_t,4> a = {max_area_left - l, l, max_area_left, d-1};
+    std::array<size_t,4> b = {r - max_area_right, max_area_right, r, d-1};
     queue.push(a);
     queue.push(b);
   }
-  int num_patch = patch_length.size();
-  for(int i=0; i<num_patch; i++){
-    check_and_confirm_patch(patch_positions[i],{patch_length[i],1});
+
+  std::vector<std::vector<bool>> is_used(frame_dim.ysize, std::vector<bool>(frame_dim.xsize, 0));
+
+  auto is_line_used = [&is_used](XY coord, size_t len) -> bool {
+    for(size_t i=0; i<len; i++) {
+      if(is_used[coord.second][coord.first+i]) return 1;
+    }
+    return 0;
+  };
+
+  auto toggle_line_usage = [&is_used](XY coord, XY dim, bool usage=1) {
+    for(size_t dy=0; dy<dim.second; dy++) {
+      for(size_t dx=0; dx<dim.first; dx++) {
+        is_used[coord.second+dy][coord.first+dx]=usage;
+      }
+    }
+  };
+
+  struct SubarrayInfo {
+    size_t value, l, r;
+
+    SubarrayInfo(size_t v, std::pair<size_t, size_t> p) {
+      value=v, l=p.first, r=p.second;
+    }
+
+    SubarrayInfo(size_t v, size_t left, size_t right) {
+      value=v, l=left, r=right;
+    }
+
+    size_t len() const {
+      return r-l+1;
+    }
+
+    bool operator<(const SubarrayInfo &si) const {
+      if(value<si.value) return 1;
+      if(value>si.value) return 0;
+      size_t this_len=len(), other_len=si.len();
+      if(this_len<other_len) return 1;
+      if(this_len>other_len) return 0;
+      return (l<si.l);
+    }
+  };
+
+  // Gets an array, returns the highest possible value of l*m where l is the length
+  // of a subarray and m is the minimum value in the subarray
+  auto find_best_subarray = [](const std::vector<size_t> &v) -> SubarrayInfo { 
+    size_t sz=v.size(), log_size=std::log2(sz)+1;
+    std::vector<std::vector<std::pair<size_t, size_t>>> sparse_table(log_size,
+                                                  std::vector<std::pair<size_t, size_t>>(sz));
+    for(size_t i=0; i<sz; i++) {
+      sparse_table[0][i]={v[i], i};
+    }
+    for(size_t i=1; i<=log_size; i++) {
+      for(size_t j=0; j<=sz-(1<<i); j++) {
+        if(sparse_table[i-1][j].first > sparse_table[i-1][j+(1<<i-1)].first) {
+          sparse_table[i][j]=sparse_table[i-1][j+(1<<i-1)];
+        } else {
+          sparse_table[i][j]=sparse_table[i-1][j];
+        }
+      }
+    }
+
+    auto min_query = [&sparse_table](size_t l, size_t r) -> std::pair<size_t, size_t> { //l and r both included
+      size_t len=r-l+1, exp=(size_t)std::log2(len);
+      std::pair<size_t, size_t> p1=sparse_table[exp][l], p2=sparse_table[exp][r-len+1];
+      return std::min(p1, p2);
+    };
+
+    auto recur_over_subarrays = [&min_query] (auto &&f, size_t l, size_t r) -> SubarrayInfo { //l and r both included
+      if(l==r) return SubarrayInfo(min_query(l, r).first, {l, r});
+      if(l>r) return SubarrayInfo(-1, {-1, -1});
+      auto [val, ind] = min_query(l, r);
+      val*=r-l+1;
+      SubarrayInfo main_info(val, {l, r}), left_info=f(f, l, ind-1), right_info=f(f, ind+1, r);
+      return std::max(main_info, std::max(left_info, right_info));
+    };
+
+    return recur_over_subarrays(recur_over_subarrays, 0, sz-1);
+  };
+
+  struct ExpansionInfo {
+    std::pair<size_t, size_t> deltaPos, deltaDim;
+    size_t area, ref;
+
+    ExpansionInfo(){}
+    
+    ExpansionInfo(const std::pair<size_t, size_t> &p1, const std::pair<size_t, size_t> &p2,
+                  const size_t &a, const size_t &r) {
+      deltaPos=p1, deltaDim=p2, area=a, ref=r;
+    }
+  };
+
+  constexpr const size_t kNumberOfRandomStarts=3;
+  size_t num_patch = patch_length.size();
+  std::mt19937 rng(42/*std::random_device()*/);
+  for(size_t curr_unique_patch=0; curr_unique_patch<num_patch; curr_unique_patch++) {
+    std::vector<XY> usable_patch_positions;
+    XY curr_p_dim = {patch_length[curr_unique_patch], 1};
+    for(auto p : patch_positions[curr_unique_patch]) {
+      if(!is_line_used(p, patch_length[curr_unique_patch])) {
+        usable_patch_positions.push_back(p);
+        toggle_line_usage(p, curr_p_dim);
+      }
+    }
+    while(1) {
+      std::uniform_int_distribution<> d(0, usable_patch_positions.size());
+      bool found_expansion=0;
+      ExpansionInfo exp_info;
+      for(size_t _=0; _<kNumberOfRandomStarts; _++){
+        size_t ref_patch=d(rng);
+
+        //look up
+        if(usable_patch_positions[ref_patch].second>0) {
+          std::vector<size_t> number_of_matching_pixels(curr_p_dim.first, 0);
+          for(auto p : usable_patch_positions) {
+            if(p.second>0) {
+              for(size_t i=0; i<curr_p_dim.first; i++) {
+                if(are_colors_same(pick({usable_patch_positions[ref_patch].first+i,
+                                      usable_patch_positions[ref_patch].second-1}),
+                                  pick({p.first+i, p.second-1}))) {
+                  number_of_matching_pixels[i]++;
+                }
+              }
+            }
+          }
+          SubarrayInfo best_subarray=find_best_subarray(number_of_matching_pixels);
+          size_t old_area, new_area=(curr_p_dim.second+1)*best_subarray.value;
+          if(found_expansion) old_area=exp_info.area;
+          else old_area=curr_p_dim.first*curr_p_dim.second;
+          if(new_area>=old_area || (!found_expansion && curr_p_dim.second<3 && new_area>old_area/10)) {
+            found_expansion=1;
+            std::pair<size_t, size_t> delta_pos = {best_subarray.l, -1},
+            delta_dim = {best_subarray.len()-curr_p_dim.first, 1};
+            exp_info=ExpansionInfo(delta_pos, delta_dim, new_area, ref_patch);
+          }
+        }
+
+        //look down
+        if(usable_patch_positions[ref_patch].second+curr_p_dim.second<frame_dim.ysize) {
+          std::vector<size_t> number_of_matching_pixels(curr_p_dim.first, 0);
+          for(auto p : usable_patch_positions) {
+            if(p.second+curr_p_dim.second<frame_dim.ysize) {
+              for(size_t i=0; i<curr_p_dim.first; i++) {
+                if(are_colors_same(pick({usable_patch_positions[ref_patch].first+i,
+                                      usable_patch_positions[ref_patch].second+curr_p_dim.second}),
+                                  pick({p.first+i, p.second+curr_p_dim.second}))) {
+                  number_of_matching_pixels[i]++;
+                }
+              }
+            }
+          }
+          SubarrayInfo best_subarray=find_best_subarray(number_of_matching_pixels);
+          size_t old_area, new_area=(curr_p_dim.second+1)*best_subarray.value;
+          if(found_expansion) old_area=exp_info.area;
+          else old_area=curr_p_dim.first*curr_p_dim.second;
+          if(new_area>=old_area || (!found_expansion && curr_p_dim.second<3 && new_area>old_area/10)) {
+            found_expansion=1;
+            std::pair<size_t, size_t> delta_pos = {best_subarray.l, 0},
+            delta_dim = {best_subarray.len()-curr_p_dim.first, 1};
+            exp_info=ExpansionInfo(delta_pos, delta_dim, new_area, ref_patch);
+          }
+        }
+      }
+      if(!found_expansion) {
+        confirm_patch(usable_patch_positions, curr_p_dim);
+        break;
+      } else {
+        XY ref_patch = usable_patch_positions[exp_info.ref];
+        for(int i=usable_patch_positions.size(); i>=0; i--) {
+          XY curr_patch = usable_patch_positions[i];
+          bool toDiscard=0;
+          size_t dy;
+          if(exp_info.deltaPos.second==-1) dy=-1;
+          else dy=curr_p_dim.second;
+          if(0<=curr_patch.second+dy && curr_patch.second+dy<frame_dim.ysize) {
+            for(size_t j=0; j<curr_p_dim.first; j++) {
+              if(!are_colors_same(pick({curr_patch.first+j, curr_patch.second+dy}),
+                                pick({ref_patch.first+j, ref_patch.second+dy}))) {
+                toDiscard=1;
+                break;
+              }
+            }
+          } else {
+            toDiscard=1;
+          }
+          if(toDiscard) {
+            std::swap(usable_patch_positions[i], usable_patch_positions[usable_patch_positions.size()]);
+            usable_patch_positions.pop_back();
+          } else {
+            usable_patch_positions[i].first+=exp_info.deltaPos.first,
+            usable_patch_positions[i].second+=exp_info.deltaPos.second;
+          }
+        }
+        curr_p_dim.first+=exp_info.deltaDim.first, curr_p_dim.second+=exp_info.deltaDim.second;
+      }
+    }
   }
 
   //auto end_time = std::chrono::steady_clock::now();
@@ -1245,6 +1438,7 @@ Status FindBestPatchDictionary(const Image3F& opsin,
                 break;
               }
             }
+            if(has_occupied_pixel) break;
           }  // end of positioning check
           if (!has_occupied_pixel) {
             found = true;
